@@ -1461,6 +1461,11 @@
             "description": "%generateOptionsSchema.allowFastEvaluate.description%",
             "default": true
           },
+          "wasm.debug.useVSDbg": {
+            "type": "boolean",
+            "description": "%generateOptionsSchema.useVSDbg.description%",
+            "default": false
+          },
           "dotnet.unitTestDebuggingOptions": {
             "type": "object",
             "description": "%configuration.dotnet.unitTestDebuggingOptions%",
@@ -4693,6 +4698,11 @@
               "env": {
                 "type": "object",
                 "description": "Environment variables passed to dotnet. Only valid for hosted apps."
+              },
+              "useVSDbg": {
+                "type": "boolean",
+                "default": false,
+                "description": "%generateOptionsSchema.useVSDbg.description%"
               },
               "dotNetConfig": {
                 "description": "Options passed to the underlying .NET debugger. For more info, see https://github.com/dotnet/vscode-csharp/blob/main/debugger.md.",

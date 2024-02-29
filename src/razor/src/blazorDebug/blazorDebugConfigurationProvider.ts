@@ -10,10 +10,11 @@ import { fileURLToPath } from 'url';
 import * as vscode from 'vscode';
 import { ChromeBrowserFinder, EdgeBrowserFinder } from '@vscode/js-debug-browsers';
 import { RazorLogger } from '../razorLogger';
-import { JS_DEBUG_NAME, SERVER_APP_NAME } from './constants';
+import { ONLY_JS_DEBUG_NAME, MANAGED_DEBUG_NAME, JS_DEBUG_NAME, SERVER_APP_NAME } from './constants';
 import { onDidTerminateDebugSession } from './terminateDebugHandler';
 import showInformationMessage from '../../../shared/observers/utils/showInformationMessage';
 import showErrorMessage from '../../../observers/utils/showErrorMessage';
+import { createServer } from 'net';
 
 export class BlazorDebugConfigurationProvider implements vscode.DebugConfigurationProvider {
     private static readonly autoDetectUserNotice: string = vscode.l10n.t(
@@ -77,6 +78,53 @@ export class BlazorDebugConfigurationProvider implements vscode.DebugConfigurati
         return undefined;
     }
 
+    private async attachToAppOnBrowser(
+        folder: vscode.WorkspaceFolder | undefined,
+        configuration: vscode.DebugConfiguration,
+        port: number
+    ) {
+        const cwd = configuration.cwd || '${workspaceFolder}';
+        const args = configuration.hosted ? [] : ['run'];
+
+        const app = {
+            name: MANAGED_DEBUG_NAME,
+            type: 'monovsdbg',
+            request: 'launch',
+            program: 'S:\\diagnostics\\icordebug_wasm\\test\\bin\\Debug\\net9.0\\wwwroot\\_framework\\test.dll',
+            args,
+            cwd,
+            cascadeTerminateToConfigurations: [ONLY_JS_DEBUG_NAME, SERVER_APP_NAME, JS_DEBUG_NAME],
+            ...configuration.dotNetConfig,
+        };
+
+        app.monoDebuggerOptions = {
+            ip: '127.0.0.1',
+            port: port,
+            platform: 'browser',
+            isServer: true,
+            assetsPath: 'S:\\diagnostics\\icordebug_wasm\\test\\bin\\Debug\\net9.0\\wwwroot\\_framework\\',
+        };
+
+        try {
+            await this.vscodeType.debug.startDebugging(folder, app);
+            const terminate = this.vscodeType.debug.onDidTerminateDebugSession(async (event) => {
+                if (process.platform !== 'win32') {
+                    const blazorDevServer = 'blazor-devserver\\.dll';
+                    const dir = folder && folder.uri && folder.uri.fsPath;
+                    const regexEscapedDir = dir!.toLowerCase()!.replace(/\//g, '\\/');
+                    const launchedApp = configuration.hosted
+                        ? app.program
+                        : `${regexEscapedDir}.*${blazorDevServer}|${blazorDevServer}.*${regexEscapedDir}`;
+                    await onDidTerminateDebugSession(event, this.logger, launchedApp);
+                    terminate.dispose();
+                }
+                this.vscodeType.debug.stopDebugging();
+            });
+        } catch (error) {
+            this.logger.logError('[DEBUGGER] Error when launching application: ', error as Error);
+        }
+    }
+
     private async launchApp(folder: vscode.WorkspaceFolder | undefined, configuration: vscode.DebugConfiguration) {
         const program = configuration.hosted ? configuration.program : 'dotnet';
         const cwd = configuration.cwd || '${workspaceFolder}';
@@ -97,6 +145,7 @@ export class BlazorDebugConfigurationProvider implements vscode.DebugConfigurati
             launchBrowser: {
                 enabled: false,
             },
+            cascadeTerminateToConfigurations: [ONLY_JS_DEBUG_NAME, MANAGED_DEBUG_NAME, JS_DEBUG_NAME],
             ...configuration.dotNetConfig,
         };
 
@@ -125,6 +174,13 @@ export class BlazorDebugConfigurationProvider implements vscode.DebugConfigurati
         inspectUri: string,
         url: string
     ) {
+        const wasmConfig = vscode.workspace.getConfiguration('wasm');
+        const useVSDbg = configuration.useVSDbg || wasmConfig.get<boolean>('debug.useVSDbg') == true;
+        if (useVSDbg) {
+            const port = await this.getPortFree();
+            inspectUri += `&usevsdbg=true&icordebugport=${port}`;
+            await this.attachToAppOnBrowser(folder, configuration, port);
+        }
         const configBrowser = configuration.browser;
         const browserType =
             configBrowser === 'edge'
@@ -137,7 +193,7 @@ export class BlazorDebugConfigurationProvider implements vscode.DebugConfigurati
         }
 
         const browser = {
-            name: JS_DEBUG_NAME,
+            name: useVSDbg ? ONLY_JS_DEBUG_NAME : JS_DEBUG_NAME,
             type: browserType,
             request: 'launch',
             timeout: configuration.timeout || 30000,
@@ -149,7 +205,7 @@ export class BlazorDebugConfigurationProvider implements vscode.DebugConfigurati
             ...configuration.browserConfig,
             // When the browser debugging session is stopped, propogate
             // this and terminate the debugging session of the Blazor dev server.
-            cascadeTerminateToConfigurations: [SERVER_APP_NAME],
+            cascadeTerminateToConfigurations: [SERVER_APP_NAME, MANAGED_DEBUG_NAME],
         };
 
         try {
@@ -209,5 +265,18 @@ export class BlazorDebugConfigurationProvider implements vscode.DebugConfigurati
             vscode.l10n.t('Run and Debug: A valid browser is not installed. Please install Edge or Chrome.')
         );
         return undefined;
+    }
+
+    async getPortFree(): Promise<number> {
+        return new Promise((res) => {
+            const srv = createServer();
+            srv.listen(0, () => {
+                const address = srv.address();
+                if (address && typeof address != 'string' && address.port) {
+                    const port = address.port;
+                    srv.close(() => res(port));
+                }
+            });
+        });
     }
 }
